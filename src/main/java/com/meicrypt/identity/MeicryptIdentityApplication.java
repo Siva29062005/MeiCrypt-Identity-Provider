@@ -1,8 +1,13 @@
 package com.meicrypt.identity;
 
+import com.meicrypt.identity.mfa.config.MfaProperties;
+import com.meicrypt.identity.notification.config.NotificationProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Main application class for MeiCrypt Identity Platform.
@@ -28,6 +33,9 @@ import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
  */
 @SpringBootApplication
 @EnableJpaAuditing
+@EnableScheduling
+@EnableAsync
+@EnableConfigurationProperties({ MfaProperties.class, NotificationProperties.class })
 public class MeicryptIdentityApplication {
 
     public static void main(String[] args) {

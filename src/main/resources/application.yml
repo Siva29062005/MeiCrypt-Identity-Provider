@@ -74,7 +74,42 @@ springdoc:
     path: /swagger-ui.html
     operations-sorter: alpha
     tags-sorter: alpha
-  paths-to-match: /api/v1/**
+  paths-to-match: /api/v1/**, /oauth2/**, /.well-known/**
+
+# MeiCrypt platform-specific configuration (Phase 3 auth + Phase 7 OIDC)
+# NOTE: `issuer` MUST be a full URL - it is advertised verbatim in the
+# `iss` claim of every OAuth/OIDC JWT and in the OpenID Connect discovery
+# document at /.well-known/openid-configuration.
+meicrypt:
+  auth:
+    issuer: ${MEICRYPT_ISSUER:http://localhost:8080}
+    # HS256 requires >= 32 bytes. Override in production via env var.
+    secret: ${MEICRYPT_JWT_SECRET:change-me-change-me-change-me-change-me-change-me!!}
+    access-token-ttl-seconds: 900         # 15 minutes
+    refresh-token-ttl-seconds: 604800     # 7 days
+    session-ttl-seconds: 28800            # 8 hours
+
+  # Phase 9 - Multi-Factor Authentication
+  mfa:
+    issuer: ${MEICRYPT_MFA_ISSUER:MeiCrypt}
+    relying-party-id: ${MEICRYPT_MFA_RP_ID:localhost}
+    relying-party-name: ${MEICRYPT_MFA_RP_NAME:MeiCrypt Identity}
+    relying-party-origin: ${MEICRYPT_MFA_RP_ORIGIN:http://localhost:8080}
+    challenge-ttl-seconds: 300
+    webauthn-challenge-ttl-seconds: 300
+    totp-allowed-time-step-skew: 1
+    max-challenge-attempts: 5
+
+  # Phase 10 - Notification Delivery (async email / SMS outbox)
+  notifications:
+    batch-size: 20
+    max-attempts: 5
+    default-locale: en
+    worker-enabled: true
+    log-only-transport: true
+    # Poll every 5 seconds. Bump up for production or lower during load tests.
+    poll-interval-ms: 5000
+
 
 ---
 # LOCAL DEVELOPMENT PROFILE
@@ -110,14 +145,19 @@ spring:
           max-wait: -1ms
 
   jpa:
-    show-sql: true
+    # Disabled to keep the console readable while the Phase 10 outbox worker
+    # polls the notifications table. Flip to true on-demand.
+    show-sql: false
 
 logging:
   level:
     com.meicrypt: DEBUG
-    org.springframework.security: DEBUG
-    org.hibernate.SQL: DEBUG
-    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    org.springframework.security: INFO
+    # Hibernate SQL logging is *off* by default so the notification outbox
+    # poller (Phase 10) does not spam the console every second.
+    # Flip this to DEBUG when you need to inspect the actual JDBC statements.
+    org.hibernate.SQL: WARN
+    org.hibernate.type.descriptor.sql.BasicBinder: WARN
 
 ---
 # TEST PROFILE

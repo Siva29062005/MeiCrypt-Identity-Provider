@@ -9,6 +9,7 @@ import com.meicrypt.identity.organization.entity.Organization;
 import com.meicrypt.identity.organization.entity.OrganizationStatus;
 import com.meicrypt.identity.organization.mapper.OrganizationMapper;
 import com.meicrypt.identity.organization.repository.OrganizationRepository;
+import com.meicrypt.identity.rbac.service.SystemRoleBootstrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -30,21 +31,26 @@ public class OrganizationService {
     private final OrganizationRepository organizationRepository;
     private final OrganizationMapper organizationMapper;
     private final OrganizationSettingsService settingsService;
+    private final SystemRoleBootstrapper systemRoleBootstrapper;
 
     /**
      * Constructor injection - zero field injection principle.
      *
-     * @param organizationRepository The organization repository
-     * @param organizationMapper     The organization mapper
-     * @param settingsService        The organization settings service
+     * @param organizationRepository  The organization repository
+     * @param organizationMapper      The organization mapper
+     * @param settingsService         The organization settings service
+     * @param systemRoleBootstrapper  Provisions SYSTEM roles for newly created
+     *                                organizations (Phase 4 RBAC)
      */
     public OrganizationService(
             OrganizationRepository organizationRepository,
             OrganizationMapper organizationMapper,
-            OrganizationSettingsService settingsService) {
+            OrganizationSettingsService settingsService,
+            SystemRoleBootstrapper systemRoleBootstrapper) {
         this.organizationRepository = organizationRepository;
         this.organizationMapper = organizationMapper;
         this.settingsService = settingsService;
+        this.systemRoleBootstrapper = systemRoleBootstrapper;
     }
 
     /**
@@ -75,6 +81,9 @@ public class OrganizationService {
         // Auto-create default settings for the new organization
         settingsService.createDefaultSettings(savedOrganization.getId());
         logger.info("Created default settings for organization: {}", savedOrganization.getId());
+
+        // Phase 4: Provision SYSTEM roles (OWNER / ADMIN / MEMBER)
+        systemRoleBootstrapper.bootstrap(savedOrganization.getId());
 
         return organizationMapper.toDTO(savedOrganization);
     }

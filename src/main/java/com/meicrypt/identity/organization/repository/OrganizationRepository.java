@@ -49,4 +49,10 @@ public interface OrganizationRepository extends JpaRepository<Organization, UUID
      * @return List of matching organizations
      */
     List<Organization> findByNameContainingIgnoreCase(String name);
+
+    /**
+     * Count organizations in a specific status. Used by the Phase 12
+     * platform-admin dashboard.
+     */
+    long countByStatus(OrganizationStatus status);
 }
