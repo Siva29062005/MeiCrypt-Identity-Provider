@@ -9,10 +9,15 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import com.meicrypt.identity.application.exception.ApplicationStateException;
 import com.meicrypt.identity.application.exception.ClientApplicationNotFoundException;
 import com.meicrypt.identity.application.exception.PublicClientSecretException;
@@ -556,6 +561,63 @@ public class GlobalExceptionHandler {
             builder = builder.header("WWW-Authenticate", "Basic realm=\"meicrypt-oauth\"");
         }
         return builder.body(body);
+    }
+
+    // ------------------------------------------------------------------
+    // Generic HTTP protocol errors (mapped to proper 4xx codes so they
+    // do not fall into the catch-all 500 handler below).
+    // ------------------------------------------------------------------
+
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ProblemDetail handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex, WebRequest request) {
+        logger.warn("Unsupported media type: {}", ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.UNSUPPORTED_MEDIA_TYPE, ex.getMessage());
+        pd.setType(URI.create(ERROR_TYPE_BASE_URI + "unsupported-media-type"));
+        pd.setTitle("Unsupported Media Type");
+        pd.setProperty("timestamp", Instant.now());
+        return pd;
+    }
+
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ProblemDetail handleMethodNotSupported(HttpRequestMethodNotSupportedException ex, WebRequest request) {
+        logger.warn("Method not allowed: {}", ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.METHOD_NOT_ALLOWED, ex.getMessage());
+        pd.setType(URI.create(ERROR_TYPE_BASE_URI + "method-not-allowed"));
+        pd.setTitle("Method Not Allowed");
+        pd.setProperty("timestamp", Instant.now());
+        return pd;
+    }
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ProblemDetail handleMissingParam(MissingServletRequestParameterException ex, WebRequest request) {
+        logger.warn("Missing parameter: {}", ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
+        pd.setType(URI.create(ERROR_TYPE_BASE_URI + "missing-parameter"));
+        pd.setTitle("Missing Request Parameter");
+        pd.setProperty("timestamp", Instant.now());
+        return pd;
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ProblemDetail handleMessageNotReadable(HttpMessageNotReadableException ex, WebRequest request) {
+        logger.warn("Malformed request body: {}", ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Malformed or unreadable request body");
+        pd.setType(URI.create(ERROR_TYPE_BASE_URI + "malformed-request"));
+        pd.setTitle("Malformed Request");
+        pd.setProperty("timestamp", Instant.now());
+        return pd;
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ProblemDetail handleTypeMismatch(MethodArgumentTypeMismatchException ex, WebRequest request) {
+        logger.warn("Argument type mismatch: {}", ex.getMessage());
+        String requiredType = ex.getRequiredType() == null ? "unknown" : ex.getRequiredType().getSimpleName();
+        String msg = "Parameter '" + ex.getName() + "' must be of type " + requiredType;
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, msg);
+        pd.setType(URI.create(ERROR_TYPE_BASE_URI + "type-mismatch"));
+        pd.setTitle("Invalid Parameter Type");
+        pd.setProperty("timestamp", Instant.now());
+        return pd;
     }
 
     /**

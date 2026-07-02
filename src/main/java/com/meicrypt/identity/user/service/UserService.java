@@ -2,13 +2,21 @@ package com.meicrypt.identity.user.service;
 
 import com.meicrypt.identity.common.exception.DuplicateResourceException;
 import com.meicrypt.identity.common.exception.ResourceNotFoundException;
+import com.meicrypt.identity.organization.entity.MembershipRole;
+import com.meicrypt.identity.organization.entity.MembershipStatus;
+import com.meicrypt.identity.organization.entity.OrganizationMembership;
 import com.meicrypt.identity.organization.entity.OrganizationSettings;
+import com.meicrypt.identity.organization.repository.OrganizationMembershipRepository;
 import com.meicrypt.identity.organization.repository.OrganizationRepository;
 import com.meicrypt.identity.organization.repository.OrganizationSettingsRepository;
+import com.meicrypt.identity.rbac.entity.MembershipRoleAssignment;
+import com.meicrypt.identity.rbac.entity.Role;
+import com.meicrypt.identity.rbac.repository.MembershipRoleAssignmentRepository;
+import com.meicrypt.identity.rbac.repository.RoleRepository;
+import com.meicrypt.identity.rbac.service.SystemRoleBootstrapper;
 import com.meicrypt.identity.user.dto.*;
 import com.meicrypt.identity.user.entity.User;
 import com.meicrypt.identity.user.entity.UserStatus;
-import com.meicrypt.identity.user.exception.EmailAlreadyVerifiedException;
 import com.meicrypt.identity.user.exception.InvalidPasswordException;
 import com.meicrypt.identity.user.mapper.UserMapper;
 import com.meicrypt.identity.user.repository.UserRepository;
@@ -36,6 +44,10 @@ public class UserService {
     private final UserRepository userRepository;
     private final OrganizationRepository organizationRepository;
     private final OrganizationSettingsRepository organizationSettingsRepository;
+    private final OrganizationMembershipRepository membershipRepository;
+    private final RoleRepository roleRepository;
+    private final MembershipRoleAssignmentRepository roleAssignmentRepository;
+    private final SystemRoleBootstrapper systemRoleBootstrapper;
     private final UserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
     private final PasswordValidator passwordValidator;
@@ -45,6 +57,10 @@ public class UserService {
             UserRepository userRepository,
             OrganizationRepository organizationRepository,
             OrganizationSettingsRepository organizationSettingsRepository,
+            OrganizationMembershipRepository membershipRepository,
+            RoleRepository roleRepository,
+            MembershipRoleAssignmentRepository roleAssignmentRepository,
+            SystemRoleBootstrapper systemRoleBootstrapper,
             UserMapper userMapper,
             PasswordEncoder passwordEncoder,
             PasswordValidator passwordValidator,
@@ -52,6 +68,10 @@ public class UserService {
         this.userRepository = userRepository;
         this.organizationRepository = organizationRepository;
         this.organizationSettingsRepository = organizationSettingsRepository;
+        this.membershipRepository = membershipRepository;
+        this.roleRepository = roleRepository;
+        this.roleAssignmentRepository = roleAssignmentRepository;
+        this.systemRoleBootstrapper = systemRoleBootstrapper;
         this.userMapper = userMapper;
         this.passwordEncoder = passwordEncoder;
         this.passwordValidator = passwordValidator;
@@ -78,11 +98,19 @@ public class UserService {
                 "email");
         }
 
-        // Get organization settings for password validation
+        // Get organization settings for password validation.
+        // If the organization exists but has no settings row yet (e.g. it
+        // was seeded via SQL migration rather than through the create-org
+        // service), lazily create a default row so registration doesn't
+        // fail with a misleading 404.
         OrganizationSettings settings = organizationSettingsRepository
             .findByOrganizationId(request.organizationId())
-            .orElseThrow(() -> new ResourceNotFoundException(
-                "OrganizationSettings", request.organizationId().toString()));
+            .orElseGet(() -> {
+                logger.info("Creating default settings for organization: {}",
+                    request.organizationId());
+                return organizationSettingsRepository.save(
+                    new OrganizationSettings(request.organizationId()));
+            });
 
         // Validate password
         PasswordValidator.ValidationResult validationResult = 
@@ -96,6 +124,11 @@ public class UserService {
             throw new InvalidPasswordException(
                 "Password is too common. Please choose a stronger password.");
         }
+
+        // Detect first user in the organization *before* saving, so we can
+        // decide whether this person should be provisioned as the Owner.
+        boolean isFirstUserInOrg =
+                userRepository.countByOrganizationId(request.organizationId()) == 0;
 
         // Create user entity
         User user = userMapper.toEntity(request);
@@ -119,10 +152,78 @@ public class UserService {
         User savedUser = userRepository.save(user);
         logger.info("User registered successfully with ID: {}", savedUser.getId());
 
+        // Provision organization membership + baseline RBAC role assignment so
+        // the new user carries the right authorities in their JWT on first
+        // login. Without this step the user has no permissions at all inside
+        // the organization and every authorized endpoint returns 403.
+        provisionMembershipAndRole(savedUser, isFirstUserInOrg);
+
         // Send verification email asynchronously
         verificationService.sendEmailVerification(savedUser.getId());
 
         return userMapper.toDTO(savedUser);
+    }
+
+    /**
+     * Create an ACTIVE membership for the user and attach either the Owner
+     * role (first user in the org) or the org's default role (typically
+     * "Member"). SYSTEM roles are bootstrapped on demand if missing.
+     */
+    private void provisionMembershipAndRole(User user, boolean promoteToOwner) {
+        UUID orgId = user.getOrganizationId();
+
+        // Ensure the SYSTEM roles (Owner/Administrator/Member) exist for the
+        // organization. The bootstrapper is idempotent — safe to call every
+        // time. This protects orgs that were seeded via SQL migration or
+        // predate the RBAC bootstrap logic.
+        try {
+            systemRoleBootstrapper.bootstrap(orgId);
+        } catch (RuntimeException ex) {
+            // Never fail registration because of RBAC bootstrap issues; log
+            // and continue. The admin can re-run the bootstrap later.
+            logger.warn("SYSTEM role bootstrap failed for organization {} - continuing without it",
+                    orgId, ex);
+        }
+
+        MembershipRole legacyRole = promoteToOwner ? MembershipRole.OWNER : MembershipRole.MEMBER;
+
+        OrganizationMembership membership = membershipRepository
+                .findByOrganizationIdAndUserId(orgId, user.getId())
+                .orElseGet(() -> membershipRepository.save(new OrganizationMembership(
+                        orgId, user.getId(), legacyRole, MembershipStatus.ACTIVE)));
+
+        // Attach the correct RBAC role. If the org has no configured default
+        // role we fall back to the "member" slug.
+        Role targetRole = null;
+        if (promoteToOwner) {
+            targetRole = roleRepository
+                    .findByOrganizationIdAndSlug(orgId, "owner")
+                    .orElse(null);
+        }
+        if (targetRole == null) {
+            List<Role> defaults = roleRepository.findByOrganizationIdAndDefaultRoleTrue(orgId);
+            if (!defaults.isEmpty()) {
+                targetRole = defaults.get(0);
+            }
+        }
+        if (targetRole == null) {
+            targetRole = roleRepository
+                    .findByOrganizationIdAndSlug(orgId, "member")
+                    .orElse(null);
+        }
+        if (targetRole == null) {
+            logger.warn("No suitable role found for organization {} - user {} left without RBAC roles",
+                    orgId, user.getId());
+            return;
+        }
+
+        if (!roleAssignmentRepository.existsByMembershipIdAndRoleId(
+                membership.getId(), targetRole.getId())) {
+            roleAssignmentRepository.save(new MembershipRoleAssignment(
+                    membership.getId(), targetRole.getId(), user.getId()));
+            logger.info("Assigned role {} to membership {} (user {})",
+                    targetRole.getSlug(), membership.getId(), user.getId());
+        }
     }
 
     /**
